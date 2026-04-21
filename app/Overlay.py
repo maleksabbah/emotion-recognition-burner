@@ -1,298 +1,159 @@
 """
-Overlay — draws emotion annotations on frames.
+Overlay — minimalist emotion annotation.
 
-Visual system:
-  - Emotion  → base color (red=angry, yellow=happy, etc.)
-  - Intensity → saturation. Low=faded toward grey, High=vivid
-  - Valence  → color temperature. Negative=cooler/blue shift, Positive=warmer/orange shift
-  - Arousal  → box thickness. Low=thin(1), High=thick(4)
+Design:
+  - Single clean bounding box around the face.
+  - One evocative word derived from the emotion + valence + arousal crosstab
+    (e.g. "ELATED", "SERENE", "ENRAGED", "MELANCHOLY").
+  - Confidence shown as a decimal (e.g. .92).
+  - No legend, no confidence bars, no secondary labels.
 
-Also draws:
-  - Emotion label + confidence
-  - Confidence bar
-  - Corner legend explaining the visual system
+Typography carries the weight, not information density.
 """
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import cv2
 import numpy as np
 
-from app.Config import (
-    FONT_SCALE, TEXT_THICKNESS,
-    BAR_WIDTH, BAR_HEIGHT,
-    EMOTION_COLORS, DEFAULT_COLOR,
-)
-
-logger = logging.getLogger("burner.overlay")
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# ── Intensity labels → scale factor ───────────────────
-INTENSITY_SCALE = {
-    "low": 0.35,
-    "medium": 0.65,
-    "high": 1.0,
+# ── Emotion word crosstab ──────────────────────────────
+# Given (emotion_label, valence_label, arousal_label), pick a single evocative word.
+# Falls back to the raw emotion label if no crosstab match.
+
+_CROSSTAB = {
+    # happy
+    ("happy",    "positive", "high"): "ELATED",
+    ("happy",    "positive", "low"):  "CONTENT",
+    ("happy",    "neutral",  "high"): "AMUSED",
+    ("happy",    "neutral",  "low"):  "PLEASED",
+
+    # neutral / calm
+    ("neutral",  "neutral",  "low"):  "STILL",
+    ("neutral",  "positive", "low"):  "SERENE",
+    ("neutral",  "negative", "low"):  "BLANK",
+    ("neutral",  "neutral",  "high"): "ALERT",
+
+    # sad
+    ("sad",      "negative", "low"):  "MELANCHOLY",
+    ("sad",      "negative", "high"): "ANGUISHED",
+    ("sad",      "neutral",  "low"):  "WISTFUL",
+
+    # angry
+    ("angry",    "negative", "high"): "ENRAGED",
+    ("angry",    "negative", "low"):  "BITTER",
+    ("angry",    "neutral",  "high"): "TENSE",
+
+    # fear
+    ("fear",     "negative", "high"): "TERRIFIED",
+    ("fear",     "negative", "low"):  "UNEASY",
+    ("fear",     "neutral",  "high"): "STARTLED",
+
+    # disgust
+    ("disgust",  "negative", "high"): "REPULSED",
+    ("disgust",  "negative", "low"):  "DISDAINFUL",
+
+    # surprise
+    ("surprise", "positive", "high"): "AWESTRUCK",
+    ("surprise", "neutral",  "high"): "STARTLED",
+    ("surprise", "negative", "high"): "SHOCKED",
 }
 
-# ── Valence labels → color shift ──────────────────────
-# Negative shifts blue channel up, positive shifts red channel up (BGR)
-VALENCE_SHIFT = {
-    "negative": (30, -10, -20),  # cooler: more blue, less red
-    "neutral": (0, 0, 0),
-    "positive": (-20, -10, 30),  # warmer: more red, less blue
-}
 
-# ── Arousal labels → box thickness ────────────────────
-AROUSAL_THICKNESS = {
-    "low": 1,
-    "high": 4,
-}
-
-def _clamp(val:int) -> int:
-    """Clamp a color channel value to 0-255."""
-    return max(0, min(255, val))
+def _word_for(emotion: str, valence: str, arousal: str) -> str:
+    key = (emotion.lower(), valence.lower(), arousal.lower())
+    if key in _CROSSTAB:
+        return _CROSSTAB[key]
+    # Loose fallback: match on emotion + arousal
+    for (e, v, a), word in _CROSSTAB.items():
+        if e == key[0] and a == key[2]:
+            return word
+    return emotion.upper()
 
 
-def get_base_color(emotion: str) -> tuple[int, int, int]:
-    """Get the raw BGR base color for an emotion."""
-    return EMOTION_COLORS.get(emotion, DEFAULT_COLOR)
+# ── Drawing ────────────────────────────────────────────
 
-def apply_intensity(
-    color: tuple[int, int, int],
-    intensity_label: str,
-) -> tuple[int, int, int]:
-    """
-    Scale color saturation by intensity.
-    Low intensity fades toward grey (160,160,160).
-    High intensity keeps full color.
-    """
-    scale = INTENSITY_SCALE.get(intensity_label, 0.65)
-    grey = 160
-    b = int(grey + (color[0] - grey) * scale)
-    g = int(grey + (color[1] - grey) * scale)
-    r = int(grey + (color[2] - grey) * scale)
-    return (_clamp(b), _clamp(g), _clamp(r))
-
-def apply_valence(
-    color: tuple[int, int, int],
-    valence_label: str,
-) -> tuple[int, int, int]:
-    """
-    Shift color temperature by valence.
-    Negative → cooler (blue shift), Positive → warmer (red shift).
-    """
-    shift = VALENCE_SHIFT.get(valence_label, (0, 0, 0))
-    return (
-        _clamp(color[0] + shift[0]),
-        _clamp(color[1] + shift[1]),
-        _clamp(color[2] + shift[2]),
-    )
+def _bbox_color(valence: str) -> tuple[int, int, int]:
+    """BGR. Warm for positive, cool for negative, off-white for neutral."""
+    v = valence.lower()
+    if v == "positive":
+        return (90, 160, 240)     # warm amber
+    if v == "negative":
+        return (180, 120, 80)     # cool slate
+    return (220, 220, 210)        # bone
 
 
-def get_box_thickness(arousal_label: str) -> int:
-    """Get box thickness from arousal level."""
-    return AROUSAL_THICKNESS.get(arousal_label, 2)
-
-
-def compute_display_color(predictions: dict[str, Any]) -> tuple[int, int, int]:
-    """
-    Compute the final display color from all prediction heads.
-    Emotion → base color → intensity scales it → valence shifts it.
-    """
-    emotion_label = predictions.get("emotion", {}).get("label", "unknown")
-    intensity_label = predictions.get("intensity", {}).get("label", "medium")
-    valence_label = predictions.get("valence", {}).get("label", "neutral")
-
-    color = get_base_color(emotion_label)
-    color = apply_intensity(color, intensity_label)
-    color = apply_valence(color, valence_label)
-    return color
-
-# ── Drawing primitives ─────────────────────────────────
-
-
-def draw_bbox(
-        frame: np.ndarray,
-        bbox: list[int],
-        color: tuple[int, int, int],
-        thickness: int = 2,
-) -> None:
-    """Draw a bounding box on the frame."""
-    x1, y1, x2, y2 = bbox
+def _draw_bbox(frame: np.ndarray, bbox: list[int], color: tuple[int, int, int], thickness: int) -> None:
+    x1, y1, x2, y2 = map(int, bbox)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
-def draw_label(
+
+def _draw_word(
     frame: np.ndarray,
     text: str,
-    position: tuple[int, int],
+    anchor: tuple[int, int],
     color: tuple[int, int, int],
-    bg_color: tuple[int, int, int] = (0, 0, 0),
-) -> int:
-    """
-    Draw a text label with background.
-    Returns the y-offset for the next line.
-    """
-    x, y = position
-    (tw, th), baseline = cv2.getTextSize(text, FONT, FONT_SCALE, TEXT_THICKNESS)
-
-    cv2.rectangle(
-        frame,
-        (x,y - th - 4),
-        (x + tw + 4,y + baseline),
-        bg_color,
-        cv2.FILLED,
-    )
-    cv2.putText(frame, text, (x + 2, y - 2), FONT, FONT_SCALE, color, TEXT_THICKNESS)
-
-    return th + baseline + 4
-
-def draw_confidence_bar(
-    frame: np.ndarray,
-    position: tuple[int, int],
-    confidence: float,
-    color: tuple[int, int, int],
-) -> int:
-    """
-    Draw a horizontal confidence bar.
-    Returns the height used.
-    """
-    x, y = position
-    bar_w = BAR_WIDTH
-    bar_h = BAR_HEIGHT
-
-    # Background
-    cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (50, 50, 50), cv2.FILLED)
-
-    # Filled portion
-    fill_w = int(bar_w * confidence)
-    if fill_w > 0:
-        cv2.rectangle(frame, (x, y), (x + fill_w, y + bar_h), color, cv2.FILLED)
-
-    # Border
-    cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (100, 100, 100), 1)
-
-    return bar_h + 4
-
-# ── Legend ──────────────────────────────────────────────
-def draw_legend(frame: np.ndarray) -> None:
-    """Draw a corner legend explaining the visual system."""
-    h, w = frame.shape[:2]
-    legend_x = 8
-    legend_y = 8
-    line_h = 16
-    small_font = 0.4
-    small_thick = 1
-
-    # Semi-transparent background
-    overlay = frame.copy()
-    legend_w = 180
-    legend_h = 140
-    cv2.rectangle(overlay, (legend_x, legend_y),
-                  (legend_x + legend_w, legend_y + legend_h),
-                  (0, 0, 0), cv2.FILLED)
-    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-
-    # Emotion colors
-    y = legend_y + 14
-    for emotion, color in EMOTION_COLORS.items():
-        cv2.circle(frame, (legend_x + 8, y - 3), 4, color, cv2.FILLED)
-        cv2.putText(frame, emotion, (legend_x + 18, y),
-                    FONT, small_font, (220, 220, 220), small_thick)
-        y += line_h
-
-    # Visual guide
-    y += 4
-    cv2.putText(frame, "vivid=strong  faded=weak", (legend_x + 4, y),
-                FONT, 0.32, (160, 160, 160), small_thick)
-    y += line_h - 2
-    cv2.putText(frame, "thick=high arousal", (legend_x + 4, y),
-                FONT, 0.32, (160, 160, 160), small_thick)
-    y += line_h - 2
-    cv2.putText(frame, "warm=positive  cool=negative", (legend_x + 4, y),
-                FONT, 0.32, (160, 160, 160), small_thick)
-
-
-# ── Main drawing functions ─────────────────────────────
-
-def draw_detection(
-        frame: np.ndarray,
-        detection: dict[str, Any],
+    scale: float,
+    thickness: int,
 ) -> None:
-    """
-    Draw a single detection with all annotations.
+    """Draw bold uppercase text with a soft shadow for legibility on any background."""
+    x, y = anchor
+    # shadow
+    cv2.putText(frame, text, (x + 2, y + 2), FONT, scale, (20, 20, 20), thickness + 1, cv2.LINE_AA)
+    # main
+    cv2.putText(frame, text, (x, y), FONT, scale, color, thickness, cv2.LINE_AA)
 
-    Visual encoding:
-      - Emotion  → base color
-      - Intensity → color saturation
-      - Valence  → color temperature (warm/cool)
-      - Arousal  → box thickness
-    """
+
+def draw_detection(frame: np.ndarray, detection: dict[str, Any]) -> None:
+    """Minimalist per-face annotation."""
+    h, w = frame.shape[:2]
     bbox = detection.get("bbox", [0, 0, 100, 100])
-    predictions = detection.get("predictions", {})
+    preds = detection.get("predictions", {})
 
-    emotion_data = predictions.get("emotion", {})
-    emotion_label = emotion_data.get("label", "unknown")
-    emotion_conf = emotion_data.get("confidence", 0.0)
-    arousal_label = predictions.get("arousal", {}).get("label", "low")
+    emotion = preds.get("emotion", {}).get("label", "unknown")
+    confidence = float(preds.get("emotion", {}).get("confidence", 0.0))
+    valence = preds.get("valence", {}).get("label", "neutral")
+    arousal = preds.get("arousal", {}).get("label", "low")
 
-    # Compute final color from emotion + intensity + valence
-    color = compute_display_color(predictions)
-    thickness = get_box_thickness(arousal_label)
+    color = _bbox_color(valence)
 
-    # Bounding box with arousal-based thickness
-    draw_bbox(frame, bbox, color, thickness)
+    # Thickness scales subtly with arousal — high feels more urgent
+    thickness = 3 if arousal.lower() == "high" else 2
+    _draw_bbox(frame, bbox, color, thickness)
 
-    x1, y1 = bbox[0], bbox[1]
-    cursor_y = y1 - 4
+    # Big word below the box, centered-ish under the face
+    word = _word_for(emotion, valence, arousal)
+    x1, y1, x2, y2 = map(int, bbox)
+    face_w = x2 - x1
 
-    # Main label: "happy 92%"
-    main_text = f"{emotion_label} {emotion_conf:.0%}"
-    h = draw_label(frame, main_text, (x1, cursor_y), color)
-    cursor_y -= h
+    # Scale letter size to the face width (1px per ~15px of face, clamped)
+    word_scale = max(0.9, min(2.4, face_w / 260.0))
+    word_thick = max(2, int(word_scale * 2))
 
-    # Confidence bar
-    draw_confidence_bar(frame, (x1, cursor_y - BAR_HEIGHT), emotion_conf, color)
-    cursor_y -= BAR_HEIGHT + 6
+    (tw, th), _ = cv2.getTextSize(word, FONT, word_scale, word_thick)
+    word_x = max(12, min(w - tw - 12, x1 + (face_w - tw) // 2))
+    word_y = min(h - 12, y2 + th + 20)
+    _draw_word(frame, word, (word_x, word_y), (240, 240, 232), word_scale, word_thick)
 
-    # Secondary info below the box
-    x_bottom = bbox[0]
-    y_bottom = bbox[3] + 16
-
-    for head_name in ("intensity", "valence", "arousal"):
-        head_data = predictions.get(head_name, {})
-        if head_data:
-            label = head_data.get("label", "?")
-            conf = head_data.get("confidence", 0.0)
-            text = f"{head_name}: {label} ({conf:.0%})"
-            draw_label(frame, text, (x_bottom, y_bottom), (180, 180, 180))
-            y_bottom += 20
+    # Confidence as a small decimal under the word (e.g. ".92")
+    conf_text = f".{int(round(confidence * 100)):02d}"
+    conf_scale = max(0.5, word_scale * 0.42)
+    conf_thick = max(1, int(conf_scale * 2))
+    (cw, ch), _ = cv2.getTextSize(conf_text, FONT, conf_scale, conf_thick)
+    conf_x = max(12, min(w - cw - 12, x1 + (face_w - cw) // 2))
+    conf_y = min(h - 6, word_y + ch + 14)
+    _draw_word(frame, conf_text, (conf_x, conf_y), (170, 170, 160), conf_scale, conf_thick)
 
 
 def annotate_frame(
-        frame: np.ndarray,
-        detections: list[dict[str, Any]],
-        show_legend: bool = True,
+    frame: np.ndarray,
+    detections: list[dict[str, Any]],
+    show_legend: bool = False,  # kept for compat, ignored
 ) -> np.ndarray:
-    """
-    Annotate a frame with all detections.
-    Returns the annotated frame (modifies in-place and returns).
-    """
-    if show_legend and detections:
-        draw_legend(frame)
-
+    """Annotate all detections on a frame. Returns the frame (also mutated in place)."""
     for det in detections:
         draw_detection(frame, det)
     return frame
-
-
-
-
-
-
-
-
-
-
