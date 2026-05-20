@@ -1,5 +1,6 @@
-aiokafka>=0.10.0
-opencv-python-headless>=4.9.0
-numpy<2
-boto3>=1.26
-httpx>=0.24
+pydantic>=2.6
+aiokafka>=0.11
+httpx>=0.27
+boto3>=1.34
+numpy>=1.26
+opencv-python-headless>=4.9

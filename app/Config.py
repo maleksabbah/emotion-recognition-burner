@@ -1,33 +1,34 @@
 """
-Burner Service configuration — loaded from environment variables.
+Burner worker configuration — env vars loaded once.
 """
+from __future__ import annotations
+
 import os
+import uuid
 
-# ── Kafka ──────────────────────────────────────────────
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
-KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "burner-worker-group")
 
-TOPIC_BURN_TASKS = os.getenv("TOPIC_BURN_TASKS", "burn_tasks")
-TOPIC_BURN_RESULTS = os.getenv("TOPIC_BURN_RESULTS", "burn_results")
+# ─── Identity ──────────────────────────────────────────────────────────
 
-# ── Drawing ────────────────────────────────────────────
-FONT_SCALE = float(os.getenv("FONT_SCALE", "0.6"))
-BOX_THICKNESS = int(os.getenv("BOX_THICKNESS", "2"))
-TEXT_THICKNESS = int(os.getenv("TEXT_THICKNESS", "1"))
-BAR_WIDTH = int(os.getenv("BAR_WIDTH", "100"))
-BAR_HEIGHT = int(os.getenv("BAR_HEIGHT", "12"))
+WORKER_ID = os.getenv("WORKER_ID", f"burner-{uuid.uuid4().hex[:8]}")
 
-# ── Emotion colors (BGR) ──────────────────────────────
-EMOTION_COLORS = {
-    "angry":    (0, 0, 220),
-    "disgust":  (0, 140, 0),
-    "fear":     (200, 100, 0),
-    "happy":    (0, 200, 255),
-    "neutral":  (200, 200, 200),
-    "sad":      (220, 150, 0),
-    "surprise": (255, 0, 200),
-}
-DEFAULT_COLOR = (180, 180, 180)
 
-# ── Worker ─────────────────────────────────────────────
-WORKER_ID = os.getenv("WORKER_ID", "burner-worker-1")
+# ─── Kafka ─────────────────────────────────────────────────────────────
+
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+BURN_TASKS_TOPIC = os.getenv("BURN_TASKS_TOPIC", "burn_tasks")
+BURN_RESULTS_TOPIC = os.getenv("BURN_RESULTS_TOPIC", "burn_results")
+BURN_GROUP_ID = os.getenv("BURN_GROUP_ID", "burner-workers")
+
+
+# ─── S3 / MinIO (source fetch) ─────────────────────────────────────────
+
+S3_INTERNAL_ENDPOINT = os.getenv("S3_INTERNAL_ENDPOINT", "http://minio:9000")
+S3_BUCKET = os.getenv("S3_BUCKET", "emotion")
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+S3_REGION = os.getenv("S3_REGION", "us-east-1")
+
+
+# ─── Storage service (POST burned output) ─────────────────────────────
+
+STORAGE_SERVICE_URL = os.getenv("STORAGE_SERVICE_URL", "http://storage:8002")
