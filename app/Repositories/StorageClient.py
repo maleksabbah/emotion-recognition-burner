@@ -13,6 +13,7 @@ import logging
 import httpx
 
 from app.Config import STORAGE_SERVICE_URL
+from app.Security.ServiceAuth import sign_request
 
 logger = logging.getLogger("burner.storage")
 
@@ -45,7 +46,9 @@ class StorageClient:
             "file_type": file_type,
         }
         resp = await self._http.post(
-            f"{STORAGE_SERVICE_URL}/internal/save-output", json=body
+            f"{STORAGE_SERVICE_URL}/internal/save-output",
+            json=body,
+            headers=sign_request({}),
         )
         if resp.status_code != 200:
             logger.error(
