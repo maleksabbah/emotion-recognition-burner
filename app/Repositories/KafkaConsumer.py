@@ -28,8 +28,10 @@ class KafkaConsumer:
         kafka_kwargs = {
             "bootstrap_servers": KAFKA_BOOTSTRAP_SERVERS,
             "group_id": BURN_GROUP_ID,
-            "enable_auto_commit": True,
+            "enable_auto_commit": False,
             "auto_offset_reset": "earliest",
+            "session_timeout_ms": 300000,
+            "max_poll_interval_ms": 1800000,
         }
         if KAFKA_SASL_USERNAME:
             kafka_kwargs.update({
@@ -44,6 +46,10 @@ class KafkaConsumer:
     async def stop(self) -> None:
         if self._consumer:
             await self._consumer.stop()
+
+    async def commit(self) -> None:
+        if self._consumer:
+            await self._consumer.commit()
 
     async def consume(self) -> AsyncIterator[dict]:
         if not self._consumer:

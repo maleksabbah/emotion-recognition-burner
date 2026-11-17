@@ -35,15 +35,25 @@ async def kafka_loop(
             task = BurnTask.model_validate(raw)
         except Exception as e:
             logger.error("Bad BurnTask: %s", e)
+            await consumer.commit()
             continue
 
         try:
             result = await burner.process_task(task)
         except Exception as e:
             logger.exception("process_task crashed: %s", e)
+            await producer.publish_burn_result({
+                "task_id": raw.get("task_id", "unknown"),
+                "session_id": raw.get("session_id", "unknown"),
+                "status": "failed",
+                "error": str(e),
+                "worker_id": WORKER_ID,
+            })
+            await consumer.commit()
             continue
 
         await producer.publish_burn_result(result.model_dump())
+        await consumer.commit()
 
 
 async def run() -> None:
